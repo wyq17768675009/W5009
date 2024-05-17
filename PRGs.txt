@@ -1,0 +1,563 @@
+PRGs提取
+
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+#BiocManager::install("limma")
+
+
+library(limma)   
+setwd#设置工作目录 
+
+rt=read.table("symbol.txt", header=T, sep="\t", check.names=F)
+rt=as.matrix(rt)
+rownames(rt)=rt[,1]
+exp=rt[,2:ncol(rt)]
+dimnames=list(rownames(exp), colnames(exp))
+data=matrix(as.numeric(as.matrix(exp)), nrow=nrow(exp), dimnames=dimnames)
+data=avereps(data)
+data=data[rowMeans(data)>0,]
+
+gene=read.table("gene.txt", header=F, sep="\t", check.names=F)
+sameGene=intersect(as.vector(gene[,1]), rownames(data))
+geneExp=data[sameGene,]
+
+out=rbind(ID=colnames(geneExp),geneExp)
+write.table(out,file="tcga.pyroptosisExp.txt",sep="\t",quote=F,col.names=F)
+
+
+差异PRGs提取
+
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+#BiocManager::install("limma")
+
+#install.packages("pheatmap")
+
+
+library(limma)
+library(pheatmap)
+expFile="tcga.pyroptosisExp.txt"     
+setwd     #设置工作目录
+
+rt=read.table(expFile, header=T, sep="\t", check.names=F)
+rt=as.matrix(rt)
+rownames(rt)=rt[,1]
+exp=rt[,2:ncol(rt)]
+dimnames=list(rownames(exp), colnames(exp))
+data=matrix(as.numeric(as.matrix(exp)), nrow=nrow(exp), dimnames=dimnames)
+data=avereps(data)
+
+group=sapply(strsplit(colnames(data),"\\-"), "[", 4)
+group=sapply(strsplit(group,""), "[", 1)
+group=gsub("2", "1", group)
+conNum=length(group[group==1])      
+treatNum=length(group[group==0])    
+sampleType=c(rep(1,conNum), rep(2,treatNum))
+
+#差异分析
+sigVec=c()
+outTab=data.frame()
+for(i in rownames(data)){
+	if(sd(data[i,])<0.001){next}
+	wilcoxTest=wilcox.test(data[i,] ~ sampleType)
+	pvalue=wilcoxTest$p.value
+	if(pvalue<0.05){
+		Sig=ifelse(pvalue<0.001,"***",ifelse(pvalue<0.01,"**",ifelse(pvalue<0.05,"*","")))
+		sigVec=c(sigVec, paste0(i, Sig))
+		conGeneMeans=mean(data[i,1:conNum])
+		treatGeneMeans=mean(data[i,(conNum+1):ncol(data)])
+		logFC=log2(treatGeneMeans)-log2(conGeneMeans)
+		outTab=rbind(outTab,cbind(gene=i,conMean=conGeneMeans,treatMean=treatGeneMeans,logFC=logFC,pValue=pvalue))
+	}
+}
+write.table(outTab, file="diff.xls", sep="\t", row.names=F, quote=F)
+write.table(outTab, file="diff.txt", sep="\t", row.names=F, quote=F)
+
+exp=data[as.vector(outTab[,1]),]
+expOut=rbind(ID=colnames(exp), exp)
+write.table(expOut, file="diffGeneExp.txt", sep="\t", col.names=F, quote=F)
+
+合并生存时间
+
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+#BiocManager::install("limma")
+
+
+library(limma)              
+expFile="tcga.share.txt"    
+cliFile="time.txt"           
+setwd   #设置工作目录
+
+rt=read.table(expFile, header=T, sep="\t", check.names=F)
+rt=as.matrix(rt)
+rownames(rt)=rt[,1]
+exp=rt[,2:ncol(rt)]
+dimnames=list(rownames(exp),colnames(exp))
+data=matrix(as.numeric(as.matrix(exp)),nrow=nrow(exp),dimnames=dimnames)
+data=avereps(data)
+data=data[rowMeans(data)>0,]
+data=t(data)
+
+cli=read.table(cliFile,sep="\t",check.names=F,header=T,row.names=1)   
+
+sameSample=intersect(row.names(data),row.names(cli))
+data=data[sameSample,]
+cli=cli[sameSample,]
+out=cbind(cli,data)
+out=cbind(id=row.names(out),out)
+write.table(out,file="tcga.expTime.txt",sep="\t",row.names=F,quote=F)
+
+
+Cox回归分析
+
+library(survival)               
+coxPfilter=0.05                
+inputFile="tcga.expTime.txt"      
+setwd     #设置工作目录
+rt=read.table(inputFile, header=T, sep="\t", check.names=F, row.names=1)     
+rt$futime=rt$futime/365
+
+outTab=data.frame()
+sigGenes=c("futime","fustat")
+for(i in colnames(rt[,3:ncol(rt)])){
+	#cox分析
+	cox <- coxph(Surv(futime, fustat) ~ rt[,i], data = rt)
+	coxSummary = summary(cox)
+	coxP=coxSummary$coefficients[,"Pr(>|z|)"]
+	if(coxP<coxPfilter){
+	    sigGenes=c(sigGenes,i)
+		outTab=rbind(outTab,
+			         cbind(id=i,
+			         HR=coxSummary$conf.int[,"exp(coef)"],
+			         HR.95L=coxSummary$conf.int[,"lower .95"],
+			         HR.95H=coxSummary$conf.int[,"upper .95"],
+			         pvalue=coxSummary$coefficients[,"Pr(>|z|)"])
+			        )
+	}
+}
+
+write.table(outTab,file="tcga.uniCox.txt",sep="\t",row.names=F,quote=F)
+
+uniSigExp=rt[,sigGenes]
+uniSigExp=cbind(id=row.names(uniSigExp),uniSigExp)
+write.table(uniSigExp,file="tcga.uniSigExp.txt",sep="\t",row.names=F,quote=F)
+
+
+bioForest=function(coxFile=null,forestFile=null,forestCol=null){
+	rt <- read.table(coxFile,header=T,sep="\t",row.names=1,check.names=F)
+	gene <- rownames(rt)
+	hr <- sprintf("%.3f",rt$"HR")
+	hrLow  <- sprintf("%.3f",rt$"HR.95L")
+	hrHigh <- sprintf("%.3f",rt$"HR.95H")
+	Hazard.ratio <- paste0(hr,"(",hrLow,"-",hrHigh,")")
+	pVal <- ifelse(rt$pvalue<0.001, "<0.001", sprintf("%.3f", rt$pvalue))
+		
+	
+	height=nrow(rt)/12.5+5
+	pdf(file=forestFile, width = 7,height = height)
+	n <- nrow(rt)
+	nRow <- n+1
+	ylim <- c(1,nRow)
+	layout(matrix(c(1,2),nc=2),width=c(3,2.5))
+	
+	xlim = c(0,3)
+	par(mar=c(4,2.5,2,1))
+	plot(1,xlim=xlim,ylim=ylim,type="n",axes=F,xlab="",ylab="")
+	text.cex=0.8
+	text(0,n:1,gene,adj=0,cex=text.cex)
+	text(1.5-0.5*0.2,n:1,pVal,adj=1,cex=text.cex);text(1.5-0.5*0.2,n+1,'pvalue',cex=text.cex,font=2,adj=1)
+	text(3,n:1,Hazard.ratio,adj=1,cex=text.cex);text(3,n+1,'Hazard ratio',cex=text.cex,font=2,adj=1,)
+		
+	par(mar=c(4,1,2,1),mgp=c(2,0.5,0))
+	xlim = c(0,max(as.numeric(hrLow),as.numeric(hrHigh)))
+	plot(1,xlim=xlim,ylim=ylim,type="n",axes=F,ylab="",xaxs="i",xlab="Hazard ratio")
+	arrows(as.numeric(hrLow),n:1,as.numeric(hrHigh),n:1,angle=90,code=3,length=0.05,col="darkblue",lwd=2.5)
+	abline(v=1,col="black",lty=2,lwd=2)
+	boxcolor = ifelse(as.numeric(hr) > 1, forestCol[1], forestCol[2])
+	points(as.numeric(hr), n:1, pch = 15, col = boxcolor, cex=1.6)
+	axis(1)
+	dev.off()
+}
+
+bioForest(coxFile="tcga.uniCox.txt",forestFile="forest.pdf",forestCol=c("red","green"))
+
+
+LASSO回归
+
+library("glmnet")
+library("survival")
+coxSigFile="tcga.uniSigExp.txt"       
+geoFile="geo.expTime.txt"            
+setwd   #设置工作目录
+
+rt=read.table(coxSigFile, header=T, sep="\t", check.names=F, row.names=1)
+geo=read.table(geoFile, header=T, sep="\t", check.names=F, row.names=1)
+sameGene=intersect(colnames(rt)[3:ncol(rt)], colnames(geo)[3:ncol(geo)])
+rt=rt[,c("futime","fustat",sameGene)]
+rt$futime[rt$futime<=0]=0.003
+x=as.matrix(rt[,c(3:ncol(rt))])
+y=data.matrix(Surv(rt$futime, rt$fustat))
+fit=glmnet(x, y, family="cox", maxit=1000)
+#lasso回归图形
+pdf("lasso.lambda.pdf")
+plot(fit, xvar = "lambda", label = TRUE)
+dev.off()
+#交叉验证图形
+cvfit=cv.glmnet(x, y, family="cox", maxit=1000)
+pdf("lasso.cvfit.pdf")
+plot(cvfit)
+abline(v=log(c(cvfit$lambda.min,cvfit$lambda.1se)),lty="dashed")
+dev.off()
+
+coef=coef(fit, s=cvfit$lambda.min)
+index=which(coef != 0)
+actCoef=coef[index]
+lassoGene=row.names(coef)[index]
+geneCoef=cbind(Gene=lassoGene, Coef=actCoef)
+write.table(geneCoef, file="lasso.geneCoef.txt", sep="\t", quote=F, row.names=F)
+
+trainFinalGeneExp=rt[,lassoGene]
+myFun=function(x){crossprod(as.numeric(x),actCoef)}
+trainScore=apply(trainFinalGeneExp,1,myFun)
+outCol=c("futime","fustat",lassoGene)
+risk=as.vector(ifelse(trainScore>median(trainScore),"high","low"))
+outTab=cbind(rt[,outCol],riskScore=as.vector(trainScore),risk)
+write.table(cbind(id=rownames(outTab),outTab),file="trainRisk.txt",sep="\t",quote=F,row.names=F)
+
+
+rt=read.table(geoFile, header=T, sep="\t", check.names=F, row.names=1)
+rt$futime=rt$futime/365
+testFinalGeneExp=rt[,lassoGene]
+testScore=apply(testFinalGeneExp,1,myFun)
+outCol=c("futime","fustat",lassoGene)
+risk=as.vector(ifelse(testScore>median(trainScore),"high","low"))
+outTab=cbind(rt[,outCol],riskScore=as.vector(testScore),risk)
+write.table(cbind(id=rownames(outTab),outTab),file="testRisk.txt",sep="\t",quote=F,row.names=F)
+
+生存分析
+
+library(survival)
+library(survminer)
+setwd    #设置工作目录
+
+#绘制生存曲线函数
+bioSurvival=function(inputFile=null,outFile=null){
+	
+	rt=read.table(inputFile, header=T, sep="\t", check.names=F)
+	
+	diff=survdiff(Surv(futime, fustat) ~risk,data = rt)
+	pValue=1-pchisq(diff$chisq,df=1)
+	if(pValue<0.001){
+		pValue="p<0.001"
+	}else{
+		pValue=paste0("p=",sprintf("%.03f",pValue))
+	}
+	fit <- survfit(Surv(futime, fustat) ~ risk, data = rt)
+		
+	
+	surPlot=ggsurvplot(fit, 
+		           data=rt,
+		           conf.int=T,
+		           pval=pValue,
+		           pval.size=6,
+		           legend.title="Risk",
+		           legend.labs=c("High risk", "Low risk"),
+		           xlab="Time(years)",
+		           break.time.by = 1,
+		           palette=c("red", "blue"),
+		           risk.table=TRUE,
+		           risk.table.title="",
+		           risk.table.height=.25)
+	pdf(file=outFile,onefile = FALSE,width = 6.5,height =5.5)
+	print(surPlot)
+	dev.off()
+}
+bioSurvival(inputFile="trainRisk.txt", outFile="trainSurv.pdf")
+bioSurvival(inputFile="testRisk.txt", outFile="testSurv.pdf")
+
+ROC曲线
+
+library(survival)
+library(survminer)
+library(timeROC)
+setwd  #设置工作目录
+
+#定义绘制ROC曲线函数
+bioROC=function(inputFile=null, rocFile=null){
+	#读取输入文件
+	rt=read.table(inputFile, header=T, sep="\t", check.names=F)
+	#ROC曲线
+	ROC_rt=timeROC(T=rt$futime, delta=rt$fustat,
+	               marker=rt$riskScore, cause=1,
+	               weighting='aalen',
+	               times=c(1,3,5), ROC=TRUE)
+	pdf(file=rocFile,width=5,height=5)
+	plot(ROC_rt,time=1,col='green',title=FALSE,lwd=2)
+	plot(ROC_rt,time=3,col='blue',add=TRUE,title=FALSE,lwd=2)
+	plot(ROC_rt,time=5,col='red',add=TRUE,title=FALSE,lwd=2)
+	legend('bottomright',
+	        c(paste0('AUC at 1 years: ',sprintf("%.03f",ROC_rt$AUC[1])),
+	          paste0('AUC at 3 years: ',sprintf("%.03f",ROC_rt$AUC[2])),
+	          paste0('AUC at 5 years: ',sprintf("%.03f",ROC_rt$AUC[3]))),
+	        col=c("green","blue","red"),lwd=2,bty = 'n')
+	dev.off()
+}
+
+bioROC(inputFile="trainRisk.txt", rocFile="train.ROC.pdf")
+bioROC(inputFile="testRisk.txt", rocFile="test.ROC.pdf")
+
+
+单因素多因素COX分析
+
+
+
+library(survival)       
+setwd#设置工作目录
+
+bioForest=function(coxFile=null, forestFile=null, forestCol=null){
+	#读取输入文件
+	rt <- read.table(coxFile,header=T,sep="\t",row.names=1,check.names=F)
+	gene <- rownames(rt)
+	hr <- sprintf("%.3f",rt$"HR")
+	hrLow  <- sprintf("%.3f",rt$"HR.95L")
+	hrLow[hrLow<0.001]=0.001
+	hrHigh <- sprintf("%.3f",rt$"HR.95H")
+	Hazard.ratio <- paste0(hr,"(",hrLow,"-",hrHigh,")")
+	pVal <- ifelse(rt$pvalue<0.001, "<0.001", sprintf("%.3f", rt$pvalue))
+		
+	pdf(file=forestFile, width=6.5, height=4.8)
+	n <- nrow(rt)
+	nRow <- n+1
+	ylim <- c(1,nRow)
+	layout(matrix(c(1,2),nc=2),width=c(3,2.5))
+		
+	xlim = c(0,3)
+	par(mar=c(4,2.5,2,1))
+	plot(1,xlim=xlim,ylim=ylim,type="n",axes=F,xlab="",ylab="")
+	text.cex=0.8
+	text(0,n:1,gene,adj=0,cex=text.cex)
+	text(1.5-0.5*0.2,n:1,pVal,adj=1,cex=text.cex);text(1.5-0.5*0.2,n+1,'pvalue',cex=text.cex,adj=1)
+	text(3,n:1,Hazard.ratio,adj=1,cex=text.cex);text(3,n+1,'Hazard ratio',cex=text.cex,adj=1,)
+		
+	
+	par(mar=c(4,1,2,1),mgp=c(2,0.5,0))
+	LOGindex=2 
+	hrLow = log(as.numeric(hrLow),LOGindex)
+	hrHigh = log(as.numeric(hrHigh),LOGindex)
+	hr = log(as.numeric(hr),LOGindex)
+	xlim = c(floor(min(hrLow,hrHigh)),ceiling(max(hrLow,hrHigh)))
+	plot(1,xlim=xlim,ylim=ylim,type="n",axes=F,ylab="",xaxs="i",xlab="Hazard ratio")
+	arrows(as.numeric(hrLow),n:1,as.numeric(hrHigh),n:1,angle=90,code=3,length=0.05,col="darkblue",lwd=2.5)
+	abline(v=log(1,LOGindex),col="black",lty=2,lwd=2)
+	boxcolor = ifelse(as.numeric(hr) > log(1,LOGindex), forestCol, forestCol)
+	points(as.numeric(hr), n:1, pch = 15, col = boxcolor, cex=2)
+	a1 = axis(1,labels=F,tick=F)
+	axis(1,a1,LOGindex^a1)
+	dev.off()
+}
+
+indep=function(riskFile=null,cliFile=null,uniOutFile=null,multiOutFile=null,uniForest=null,multiForest=null){
+	risk=read.table(riskFile, header=T, sep="\t", check.names=F, row.names=1)    
+	cli=read.table(cliFile, header=T, sep="\t", check.names=F, row.names=1)    
+	
+	sameSample=intersect(row.names(cli),row.names(risk))
+	risk=risk[sameSample,]
+	cli=cli[sameSample,]
+	rt=cbind(futime=risk[,1], fustat=risk[,2], cli, riskScore=risk[,(ncol(risk)-1)])
+	
+	uniTab=data.frame()
+	for(i in colnames(rt[,3:ncol(rt)])){
+		 cox <- coxph(Surv(futime, fustat) ~ rt[,i], data = rt)
+		 coxSummary = summary(cox)
+		 uniTab=rbind(uniTab,
+		              cbind(id=i,
+		              HR=coxSummary$conf.int[,"exp(coef)"],
+		              HR.95L=coxSummary$conf.int[,"lower .95"],
+		              HR.95H=coxSummary$conf.int[,"upper .95"],
+		              pvalue=coxSummary$coefficients[,"Pr(>|z|)"])
+		              )
+	}
+	write.table(uniTab,file=uniOutFile,sep="\t",row.names=F,quote=F)
+	bioForest(coxFile=uniOutFile, forestFile=uniForest, forestCol="green")
+
+	uniTab=uniTab[as.numeric(uniTab[,"pvalue"])<0.05,]
+	rt1=rt[,c("futime", "fustat", as.vector(uniTab[,"id"]))]
+	multiCox=coxph(Surv(futime, fustat) ~ ., data = rt1)
+	multiCoxSum=summary(multiCox)
+	multiTab=data.frame()
+	multiTab=cbind(
+	             HR=multiCoxSum$conf.int[,"exp(coef)"],
+	             HR.95L=multiCoxSum$conf.int[,"lower .95"],
+	             HR.95H=multiCoxSum$conf.int[,"upper .95"],
+	             pvalue=multiCoxSum$coefficients[,"Pr(>|z|)"])
+	multiTab=cbind(id=row.names(multiTab),multiTab)
+	write.table(multiTab,file=multiOutFile,sep="\t",row.names=F,quote=F)
+	bioForest(coxFile=multiOutFile, forestFile=multiForest, forestCol="red")
+}
+
+indep(riskFile="trainRisk.txt",
+      cliFile="clinical.txt",
+      uniOutFile="uniCox.txt",
+      multiOutFile="multiCox.txt",
+      uniForest="uniForest.pdf",
+      multiForest="multiForest.pdf")
+
+GO分析
+
+
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+#BiocManager::install("org.Hs.eg.db")
+#BiocManager::install("DOSE")
+#BiocManager::install("clusterProfiler")
+#BiocManager::install("enrichplot")
+
+
+library("clusterProfiler")
+library("org.Hs.eg.db")
+library("enrichplot")
+library("ggplot2")
+
+pvalueFilter=0.05           
+qvalueFilter=0.05        
+
+colorSel="qvalue"
+if(qvalueFilter>0.05){
+	colorSel="pvalue"
+}
+	
+setwd    #设置工作目录
+rt=read.table("TCGA.riskDiff.txt", header=T, sep="\t", check.names=F)     
+
+genes=as.vector(rt[,1])
+entrezIDs=mget(genes, org.Hs.egSYMBOL2EG, ifnotfound=NA)
+entrezIDs=as.character(entrezIDs)
+gene=entrezIDs[entrezIDs!="NA"]       
+#gene=gsub("c\\(\"(\\d+)\".*", "\\1", gene)
+
+kk=enrichGO(gene = gene,OrgDb = org.Hs.eg.db, pvalueCutoff =1, qvalueCutoff = 1, ont="all", readable =T)
+GO=as.data.frame(kk)
+GO=GO[(GO$pvalue<pvalueFilter & GO$qvalue<qvalueFilter),]
+write.table(GO,file="GO.txt",sep="\t",quote=F,row.names = F)
+
+#定义显示Term数目
+showNum=10
+if(nrow(GO)<30){
+	showNum=nrow(GO)
+}
+
+pdf(file="barplot.pdf",width = 10,height =7)
+bar=barplot(kk, drop = TRUE, showCategory =showNum,split="ONTOLOGY",color = colorSel) + facet_grid(ONTOLOGY~., scale='free')
+print(bar)
+dev.off()
+		
+pdf(file="bubble.pdf",width = 10,height =7)
+bub=dotplot(kk,showCategory = showNum, orderBy = "GeneRatio",split="ONTOLOGY", color = colorSel) + facet_grid(ONTOLOGY~., scale='free')
+print(bub)
+dev.off()
+
+
+KEGG分析
+
+
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+#BiocManager::install("org.Hs.eg.db")
+#BiocManager::install("DOSE")
+#BiocManager::install("clusterProfiler")
+#BiocManager::install("enrichplot")
+
+library("clusterProfiler")
+library("org.Hs.eg.db")
+library("enrichplot")
+library("ggplot2")
+
+pvalueFilter=0.05         
+qvalueFilter=0.05       
+
+#定义颜色
+colorSel="qvalue"
+if(qvalueFilter>0.05){
+	colorSel="pvalue"
+}
+	
+setwd   #设置工作目录
+rt=read.table("TCGA.riskDiff.txt", header=T, sep="\t", check.names=F)   
+
+#基因名字转换为基因id
+genes=as.vector(rt[,1])
+entrezIDs=mget(genes, org.Hs.egSYMBOL2EG, ifnotfound=NA)
+entrezIDs=as.character(entrezIDs)
+rt=cbind(rt,entrezID=entrezIDs)
+gene=entrezIDs[entrezIDs!="NA"]        
+#gene=gsub("c\\(\"(\\d+)\".*", "\\1", gene)
+
+#kegg富集分析
+kk <- enrichKEGG(gene = gene, organism = "hsa", pvalueCutoff =1, qvalueCutoff =1)
+KEGG=as.data.frame(kk)
+KEGG$geneID=as.character(sapply(KEGG$geneID,function(x)paste(rt$gene[match(strsplit(x,"/")[[1]],as.character(rt$entrezID))],collapse="/")))
+KEGG=KEGG[(KEGG$pvalue<pvalueFilter & KEGG$qvalue<qvalueFilter),]
+#保存富集结果
+write.table(KEGG,file="KEGG.txt",sep="\t",quote=F,row.names = F)
+
+#定义显示Term数目
+showNum=30
+if(nrow(KEGG)<showNum){
+	showNum=nrow(KEGG)
+}
+
+pdf(file="barplot.pdf",width = 9,height = 7)
+barplot(kk, drop = TRUE, showCategory = showNum, color = colorSel)
+dev.off()
+
+pdf(file="bubble.pdf",width = 9,height = 7)
+dotplot(kk, showCategory = showNum, orderBy = "GeneRatio",color = colorSel)
+dev.off()
+
+ssGSEA分析
+
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+#BiocManager::install("limma")
+
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+#BiocManager::install("GSVA")
+
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+#BiocManager::install("GSEABase")
+
+library(GSVA)
+library(limma)
+library(GSEABase)
+setwd   #设置工作目录
+
+immuneScore=function(expFile=null, gmtFile=null, project=null){
+	#读取表达输入文件，并对输入文件处理
+	rt=read.table(expFile, header=T, sep="\t", check.names=F)
+	rt=as.matrix(rt)
+	rownames(rt)=rt[,1]
+	exp=rt[,2:ncol(rt)]
+	dimnames=list(rownames(exp),colnames(exp))
+	mat=matrix(as.numeric(as.matrix(exp)),nrow=nrow(exp),dimnames=dimnames)
+	mat=avereps(mat)
+	mat=mat[rowMeans(mat)>0,]
+	
+	geneSet=getGmt(gmtFile, geneIdType=SymbolIdentifier())
+	
+	#ssgsea分析
+	ssgseaScore=gsva(mat, geneSet, method='ssgsea', kcdf='Gaussian', abs.ranking=TRUE)
+	#定义ssGSEA score矫正函数
+	normalize=function(x){
+	  return((x-min(x))/(max(x)-min(x)))}
+	#对ssGSEA score进行矫正
+	ssgseaOut=normalize(ssgseaScore)
+	ssgseaOut=rbind(id=colnames(ssgseaOut),ssgseaOut)
+	write.table(ssgseaOut, file=paste0(project, ".score.txt"), sep="\t", quote=F, col.names=F)
+}
+
+#调用函数,进行ssGSEA分析
+immuneScore(expFile="TCGA.normalize.txt", gmtFile="immune.gmt", project="TCGA")
+immuneScore(expFile="GEO.normalize.txt", gmtFile="immune.gmt", project="GEO")
